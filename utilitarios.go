@@ -83,7 +83,7 @@ func FileSizeFromURLVerify(fileURL string, maxSizeMB int) error {
 	defer headResp.Body.Close()
 
 	// Verifica o status da resposta
-	if headResp.StatusCode > 299 || headResp.StatusCode <= 200 {
+	if headResp.StatusCode > 299 {
 		return errors.New("Erro: Status da resposta inválido")
 	}
 
