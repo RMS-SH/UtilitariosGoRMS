@@ -2,11 +2,14 @@ package utilitariosgorms
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"time"
@@ -80,6 +83,7 @@ type DownloadResponse struct {
 // de "timeout" (por exemplo, 30s). Retorna:
 // - DownloadResponse (com Data, RemoteIP, SizeInMB, StatusCode)
 // - error, caso haja falha (timeout, statuscode ruim, tamanho acima do permitido, etc.)
+// DownloadWithTimeout baixa todo o conteúdo de "fileURL" com timeout
 func DownloadWithTimeout(fileURL string, maxSizeMB int, timeout time.Duration) (*DownloadResponse, error) {
 
 	// 1) Faz parse do URL para verificar se é válida.
@@ -93,17 +97,17 @@ func DownloadWithTimeout(fileURL string, maxSizeMB int, timeout time.Duration) (
 	dialer := &net.Dialer{}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			// address normalmente vem como "host:porta"
 			conn, err := dialer.DialContext(ctx, network, address)
 			if err == nil {
 				remoteIP = conn.RemoteAddr().String()
-				// remoteIP geralmente vem no formato "IP:port", ex.: "192.168.0.10:443"
-				// Se quiser só o IP sem porta, pode dar um split:
 				if idx := strings.LastIndex(remoteIP, ":"); idx != -1 {
 					remoteIP = remoteIP[:idx]
 				}
 			}
 			return conn, err
+		},
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: false, // Defina conforme necessário
 		},
 	}
 
@@ -113,13 +117,24 @@ func DownloadWithTimeout(fileURL string, maxSizeMB int, timeout time.Duration) (
 		Timeout:   timeout, // Cancela toda a operação (DNS + connect + download)
 	}
 
-	// 4) Cria uma request com contexto de 30s (ou "timeout" escolhido)
+	// 4) Cria uma request com contexto de timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao criar requisição GET: %w", err)
+	}
+
+	// Define o User-Agent para o mesmo do curl
+	req.Header.Set("User-Agent", "curl/8.9.1")
+
+	// Log da requisição
+	dump, err := httputil.DumpRequest(req, false)
+	if err != nil {
+		log.Printf("Erro ao dar dump na request: %v", err)
+	} else {
+		log.Printf("Request: %s", string(dump))
 	}
 
 	// 5) Executa a requisição
@@ -129,12 +144,19 @@ func DownloadWithTimeout(fileURL string, maxSizeMB int, timeout time.Duration) (
 	}
 	defer resp.Body.Close()
 
+	// Log da resposta
+	dumpResp, err := httputil.DumpResponse(resp, false)
+	if err != nil {
+		log.Printf("Erro ao dar dump na response: %v", err)
+	} else {
+		log.Printf("Response: %s", string(dumpResp))
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, fmt.Errorf("status de resposta inválido: %d", resp.StatusCode)
 	}
 
 	// 6) Lê todo o conteúdo do Body em memória.
-	//    CUIDADO: se for muito grande, pode estourar memória.
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao ler resposta HTTP: %w", err)
@@ -145,8 +167,7 @@ func DownloadWithTimeout(fileURL string, maxSizeMB int, timeout time.Duration) (
 	sizeInMB := sizeInBytes / (1024 * 1024)
 
 	if sizeInMB > int64(maxSizeMB) {
-		return nil, errors.New(
-			fmt.Sprintf("arquivo excede limite de %dMB (baixados: %dMB)", maxSizeMB, sizeInMB))
+		return nil, fmt.Errorf("arquivo excede limite de %dMB (baixados: %dMB)", maxSizeMB, sizeInMB)
 	}
 
 	// 8) Monta e retorna a estrutura de resposta
