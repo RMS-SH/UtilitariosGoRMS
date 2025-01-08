@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -66,42 +68,58 @@ func GetFileSizeFromURL(fileURL string) (int64, error) {
 //---//
 
 // Verifica com base no tamanho em MB passado se o arquivo é do tamanho correspondente.
-func FileSizeFromURLVerify(fileURL string, maxSizeMB int) error {
-	// Parseia a URL
+func FileSizeFromURLVerifyUsingRange(fileURL string, maxSizeMB int) error {
 	parsedURL, err := url.Parse(fileURL)
 	if err != nil {
-		fmt.Printf("Erro: URL inválida (%v)\n", err)
-		return errors.New("Não foi possível parserar a URL")
+		return fmt.Errorf("URL inválida: %w", err)
 	}
 
-	// Faz a requisição HEAD para obter o tamanho do arquivo
-	headResp, err := http.Head(parsedURL.String())
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", parsedURL.String(), nil)
 	if err != nil {
-		fmt.Printf("Erro: Falha ao fazer requisição HEAD (%v)\n", err)
-		return errors.New("Não foi possível realizar o request")
-	}
-	defer headResp.Body.Close()
-
-	// Verifica o status da resposta
-	if headResp.StatusCode > 299 {
-		return errors.New("Erro: Status da resposta inválido")
+		return fmt.Errorf("erro ao criar request: %w", err)
 	}
 
-	// Obtém o tamanho do arquivo
-	size := headResp.ContentLength
-	if size <= 0 {
-		return errors.New("Erro: Não foi possível determinar o tamanho do arquivo")
+	// Pedimos somente o primeiro byte do arquivo
+	req.Header.Set("Range", "bytes=0-0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("erro ao fazer request GET Range: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Se o servidor não suportar Range, pode devolver 200 OK inteiro,
+	// o que não ajuda muito. Então conferimos se obtemos status 206.
+	if resp.StatusCode != http.StatusPartialContent {
+		return errors.New("o servidor não suportou a requisição parcial (range request)")
 	}
 
-	// Converte o tamanho para megabytes
-	sizeMB := size / (1024 * 1024)
+	// Exemplo de cabeçalho: "Content-Range: bytes 0-0/1500000"
+	contentRange := resp.Header.Get("Content-Range")
+	if contentRange == "" {
+		return errors.New("não foi possível obter Content-Range no cabeçalho")
+	}
 
-	// Verifica se o tamanho está dentro do limite
+	// contentRange deve conter algo como "bytes 0-0/1500000"
+	parts := strings.Split(contentRange, "/")
+	if len(parts) != 2 {
+		return errors.New("formato de Content-Range inesperado")
+	}
+
+	totalSizeStr := parts[1] // "1500000"
+	totalSize, err := strconv.ParseInt(totalSizeStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("erro ao converter tamanho: %w", err)
+	}
+
+	// converte para MB
+	sizeMB := totalSize / (1024 * 1024)
 	if sizeMB > int64(maxSizeMB) {
-		return errors.New(fmt.Sprintf("Erro: Tamanho do arquivo excede o limite (%d MB > %d MB)\n", sizeMB, maxSizeMB))
+		return fmt.Errorf("erro: arquivo excede limite de %dMB (tamanho: %dMB)", maxSizeMB, sizeMB)
 	}
 
-	// Tamanho válido
+	// Tudo certo
 	return nil
 }
 
