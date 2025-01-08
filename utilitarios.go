@@ -1,12 +1,13 @@
 package utilitariosgorms
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -67,60 +68,94 @@ func GetFileSizeFromURL(fileURL string) (int64, error) {
 
 //---//
 
-// Verifica com base no tamanho em MB passado se o arquivo é do tamanho correspondente.
-func FileSizeFromURLVerifyUsingRange(fileURL string, maxSizeMB int) error {
+// DownloadResponse armazena o resultado do download.
+type DownloadResponse struct {
+	Data       []byte // Conteúdo baixado
+	RemoteIP   string // IP do servidor remoto
+	SizeInMB   int64  // Tamanho do conteúdo em MB
+	StatusCode int    // Código de status HTTP, se quiser usar
+}
+
+// DownloadWithTimeout baixa todo o conteúdo de "fileURL" com timeout
+// de "timeout" (por exemplo, 30s). Retorna:
+// - DownloadResponse (com Data, RemoteIP, SizeInMB, StatusCode)
+// - error, caso haja falha (timeout, statuscode ruim, tamanho acima do permitido, etc.)
+func DownloadWithTimeout(fileURL string, maxSizeMB int, timeout time.Duration) (*DownloadResponse, error) {
+
+	// 1) Faz parse do URL para verificar se é válida.
 	parsedURL, err := url.Parse(fileURL)
 	if err != nil {
-		return fmt.Errorf("URL inválida: %w", err)
+		return nil, fmt.Errorf("URL inválida: %w", err)
 	}
 
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", parsedURL.String(), nil)
+	// 2) Criamos um dialer customizado para capturar o IP remoto.
+	var remoteIP string
+	dialer := &net.Dialer{}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			// address normalmente vem como "host:porta"
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err == nil {
+				remoteIP = conn.RemoteAddr().String()
+				// remoteIP geralmente vem no formato "IP:port", ex.: "192.168.0.10:443"
+				// Se quiser só o IP sem porta, pode dar um split:
+				if idx := strings.LastIndex(remoteIP, ":"); idx != -1 {
+					remoteIP = remoteIP[:idx]
+				}
+			}
+			return conn, err
+		},
+	}
+
+	// 3) Cria um *client* com o transport e com timeout total.
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   timeout, // Cancela toda a operação (DNS + connect + download)
+	}
+
+	// 4) Cria uma request com contexto de 30s (ou "timeout" escolhido)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", parsedURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("erro ao criar request: %w", err)
+		return nil, fmt.Errorf("erro ao criar requisição GET: %w", err)
 	}
 
-	// Pedimos somente o primeiro byte do arquivo
-	req.Header.Set("Range", "bytes=0-0")
-
+	// 5) Executa a requisição
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("erro ao fazer request GET Range: %w", err)
+		return nil, fmt.Errorf("erro ao baixar arquivo: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Se o servidor não suportar Range, pode devolver 200 OK inteiro,
-	// o que não ajuda muito. Então conferimos se obtemos status 206.
-	if resp.StatusCode != http.StatusPartialContent {
-		return errors.New("o servidor não suportou a requisição parcial (range request)")
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("status de resposta inválido: %d", resp.StatusCode)
 	}
 
-	// Exemplo de cabeçalho: "Content-Range: bytes 0-0/1500000"
-	contentRange := resp.Header.Get("Content-Range")
-	if contentRange == "" {
-		return errors.New("não foi possível obter Content-Range no cabeçalho")
-	}
-
-	// contentRange deve conter algo como "bytes 0-0/1500000"
-	parts := strings.Split(contentRange, "/")
-	if len(parts) != 2 {
-		return errors.New("formato de Content-Range inesperado")
-	}
-
-	totalSizeStr := parts[1] // "1500000"
-	totalSize, err := strconv.ParseInt(totalSizeStr, 10, 64)
+	// 6) Lê todo o conteúdo do Body em memória.
+	//    CUIDADO: se for muito grande, pode estourar memória.
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("erro ao converter tamanho: %w", err)
+		return nil, fmt.Errorf("erro ao ler resposta HTTP: %w", err)
 	}
 
-	// converte para MB
-	sizeMB := totalSize / (1024 * 1024)
-	if sizeMB > int64(maxSizeMB) {
-		return fmt.Errorf("erro: arquivo excede limite de %dMB (tamanho: %dMB)", maxSizeMB, sizeMB)
+	// 7) Verifica o tamanho do que foi lido
+	sizeInBytes := int64(len(data))
+	sizeInMB := sizeInBytes / (1024 * 1024)
+
+	if sizeInMB > int64(maxSizeMB) {
+		return nil, errors.New(
+			fmt.Sprintf("arquivo excede limite de %dMB (baixados: %dMB)", maxSizeMB, sizeInMB))
 	}
 
-	// Tudo certo
-	return nil
+	// 8) Monta e retorna a estrutura de resposta
+	return &DownloadResponse{
+		Data:       data,
+		RemoteIP:   remoteIP,
+		SizeInMB:   sizeInMB,
+		StatusCode: resp.StatusCode,
+	}, nil
 }
 
 // -- //
