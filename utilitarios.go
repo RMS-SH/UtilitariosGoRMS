@@ -3,7 +3,6 @@ package utilitariosgorms
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -241,9 +240,17 @@ func FormatDate(dateStr string, formatOption int) (string, error) {
 
 // -- //
 
-func ProcessInputText(inputText, tipoComURL string) (string, error) {
+// Response representa a estrutura de cada resposta processada.
+type Response struct {
+	RespostaIA string
+	Tipo       string
+	URL        string
+}
+
+// ProcessInputText processa o texto de entrada e retorna um slice de structs Response.
+func ProcessInputText(inputText, tipoComURL string) ([]Response, error) {
 	parts := strings.Split(inputText, "\n\n")
-	results := []map[string]interface{}{}
+	results := []Response{}
 
 	for _, part := range parts {
 		url := ""
@@ -274,26 +281,22 @@ func ProcessInputText(inputText, tipoComURL string) (string, error) {
 				}
 			}
 			respostaIA := subpart
-			results = append(results, map[string]interface{}{
-				"respostaIA": respostaIA,
-				"tipo":       tipo,
-				"url":        url,
-			})
+
+			// Cria uma instância da struct Response
+			response := Response{
+				RespostaIA: respostaIA,
+				Tipo:       tipo,
+				URL:        url,
+			}
+
+			results = append(results, response)
 		}
 	}
 
-	jsonBytes, err := json.Marshal(results)
-	if err != nil {
-		return "", err
-	}
-
-	jsonString := string(jsonBytes)
-	jsonString = strings.ReplaceAll(jsonString, `\`, `\\`)
-	jsonString = strings.ReplaceAll(jsonString, `"`, `\"`)
-
-	return jsonString, nil
+	return results, nil
 }
 
+// processMarkdownTitles processa os títulos Markdown para formatação desejada.
 func processMarkdownTitles(text string) string {
 	replacements := []struct {
 		pattern string
@@ -316,6 +319,7 @@ func processMarkdownTitles(text string) string {
 	return text
 }
 
+// processFormatting processa a formatação do texto.
 func processFormatting(text string) string {
 	text = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllString(text, `*$1*`)
 	text = regexp.MustCompile(`__(.*?)__`).ReplaceAllString(text, `*$1*`)
@@ -323,6 +327,7 @@ func processFormatting(text string) string {
 	return text
 }
 
+// segmentText divide o texto em segmentos de tamanho máximo especificado.
 func segmentText(text string, maxLength int) []string {
 	var segments []string
 	var currentSegment strings.Builder
@@ -339,12 +344,10 @@ func segmentText(text string, maxLength int) []string {
 				segments = append(segments, currentSegment.String())
 				currentSegment.Reset()
 			}
-			// se o parágrafo excede o limite
-			if len(para) > maxLength {
-				for len(para) > maxLength {
-					segments = append(segments, para[:maxLength])
-					para = para[maxLength:]
-				}
+			// Se o parágrafo excede o limite
+			for len(para) > maxLength {
+				segments = append(segments, para[:maxLength])
+				para = para[maxLength:]
 			}
 			currentSegment.WriteString(para)
 		}
