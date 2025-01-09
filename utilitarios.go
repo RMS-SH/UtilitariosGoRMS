@@ -3,6 +3,7 @@ package utilitariosgorms
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -238,3 +240,119 @@ func FormatDate(dateStr string, formatOption int) (string, error) {
 }
 
 // -- //
+
+func ProcessInputText(inputText, tipoComURL string) (string, error) {
+	parts := strings.Split(inputText, "\n\n")
+	results := []map[string]interface{}{}
+
+	for _, part := range parts {
+		url := ""
+		linkRegex := regexp.MustCompile(`\[(.*?)\]\((.*?)\)`)
+		matches := linkRegex.FindAllStringSubmatch(part, -1)
+		for _, match := range matches {
+			linkText := match[1]
+			url = match[2]
+			part = strings.Replace(part, match[0], linkText+" ("+url+")", 1)
+		}
+
+		// Processa títulos
+		part = processMarkdownTitles(part)
+		part = processFormatting(part)
+
+		part = strings.TrimSpace(part)
+		segments := segmentText(part, 4096)
+
+		for _, subpart := range segments {
+			var tipo string
+			if strings.Contains(strings.ToLower(url), "meet") {
+				tipo = "meet"
+			} else {
+				if url != "" {
+					tipo = tipoComURL
+				} else {
+					tipo = "texto"
+				}
+			}
+			respostaIA := subpart
+			results = append(results, map[string]interface{}{
+				"respostaIA": respostaIA,
+				"tipo":       tipo,
+				"url":        url,
+			})
+		}
+	}
+
+	jsonBytes, err := json.Marshal(results)
+	if err != nil {
+		return "", err
+	}
+
+	jsonString := string(jsonBytes)
+	jsonString = strings.ReplaceAll(jsonString, `\`, `\\`)
+	jsonString = strings.ReplaceAll(jsonString, `"`, `\"`)
+
+	return jsonString, nil
+}
+
+func processMarkdownTitles(text string) string {
+	replacements := []struct {
+		pattern string
+		replace string
+	}{
+		{`(?m)^######\s*(.*)$`, `*$1*`},
+		{`(?m)^#####\s*(.*)$`, `*$1*`},
+		{`(?m)^####\s*(.*)$`, `*$1*`},
+		{`(?m)^###\s*(.*)$`, `*$1*`},
+		{`(?m)^##\s*(.*)$`, `*$1*`},
+		{`(?m)^#\s*(.*)$`, `*$1*`},
+	}
+
+	for _, rep := range replacements {
+		r := regexp.MustCompile(rep.pattern)
+		text = r.ReplaceAllString(text, rep.replace)
+	}
+
+	text = regexp.MustCompile(`(\*.*?\*)(\n)`).ReplaceAllString(text, `$1\n\n`)
+	return text
+}
+
+func processFormatting(text string) string {
+	text = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllString(text, `*$1*`)
+	text = regexp.MustCompile(`__(.*?)__`).ReplaceAllString(text, `*$1*`)
+	text = regexp.MustCompile(`~~(.*?)~~`).ReplaceAllString(text, `~$1~`)
+	return text
+}
+
+func segmentText(text string, maxLength int) []string {
+	var segments []string
+	var currentSegment strings.Builder
+
+	paragraphs := strings.Split(text, "\n\n")
+	for _, para := range paragraphs {
+		if currentSegment.Len()+len(para)+2 <= maxLength {
+			if currentSegment.Len() > 0 {
+				currentSegment.WriteString("\n\n")
+			}
+			currentSegment.WriteString(para)
+		} else {
+			if currentSegment.Len() > 0 {
+				segments = append(segments, currentSegment.String())
+				currentSegment.Reset()
+			}
+			// se o parágrafo excede o limite
+			if len(para) > maxLength {
+				for len(para) > maxLength {
+					segments = append(segments, para[:maxLength])
+					para = para[maxLength:]
+				}
+			}
+			currentSegment.WriteString(para)
+		}
+	}
+
+	if currentSegment.Len() > 0 {
+		segments = append(segments, currentSegment.String())
+	}
+
+	return segments
+}
